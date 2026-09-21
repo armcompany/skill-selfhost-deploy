@@ -1,106 +1,106 @@
 ---
 name: selfhost-deploy
-description: Use when deploying, planning, or diagnosing self-hosted projects with Docker/Compose on macOS + Colima or Linux VPS, preserving existing services and offering explicit choices for access, database, proxy, HTTPS, and persistence.
+description: Use when deploying, planning, or diagnosing self-hosted projects with Docker/Compose on macOS + Colima or Linux VPS, preserving existing services and offering explicit choices for access, database, proxy, HTTPS, and persistence. Also use to automate deploy-on-git-push via GitHub webhook and Tailscale Funnel.
 ---
 
 # selfhost-deploy
 
-## Objetivo
+## Goal
 
-Implantar projetos de forma repetível e segura em infraestrutura self-hosted, especialmente:
+Deploy projects repeatably and safely on self-hosted infrastructure, especially:
 
-- Mac Apple Silicon com macOS + Colima + Docker;
-- VPS Linux com Docker;
-- múltiplos projetos no mesmo host;
-- frontend web + API + banco/cache/telemetria;
-- acesso local, privado por Tailscale ou público por domínio.
+- Mac Apple Silicon with macOS + Colima + Docker;
+- Linux VPS with Docker;
+- multiple projects on the same host;
+- web frontend + API + database/cache/telemetry;
+- local access, private via Tailscale, or public via a domain.
 
-A skill deve **investigar antes de alterar**. Nunca presumir nomes de variáveis, portas, banco, framework, estrutura do repositório ou estratégia de migrations.
+The skill must **investigate before changing**. Never assume variable names, ports, database, framework, repository layout, or migrations strategy.
 
 ---
 
-## Princípios obrigatórios
+## Mandatory principles
 
-1. **Não derrubar serviços existentes.**
-   - Antes de criar containers, proxy ou portas, inspecionar o host.
-   - Não executar `docker compose down`, `docker-compose down`, `kill`, `pkill`, `rm`, `down -v` ou remoção de volumes de outro projeto sem autorização explícita.
+1. **Do not take down existing services.**
+   - Before creating containers, proxies, or ports, audit the host.
+   - Do not run `docker compose down`, `docker-compose down`, `kill`, `pkill`, `rm`, `down -v`, or remove another project's volumes without explicit authorization.
 
-2. **Não inventar configuração.**
-   - Descobrir como a aplicação realmente lê configuração.
-   - Procurar `DATABASE_URL`, `DB_HOST`, `ConfigService`, Prisma, TypeORM, Sequelize, Redis, Vite envs etc.
+2. **Do not invent configuration.**
+   - Find out how the application actually reads configuration.
+   - Look for `DATABASE_URL`, `DB_HOST`, `ConfigService`, Prisma, TypeORM, Sequelize, Redis, Vite envs, etc.
 
-3. **Separar os três contextos de rede.**
-   - Container → container: nome do serviço Docker, ex. `postgres:5432`.
-   - Host → container: `localhost:<porta-publicada>`.
-   - Outro dispositivo → host: IP/hostname Tailscale, IP público ou domínio.
+3. **Separate the three network contexts.**
+   - Container → container: Docker service name, e.g. `postgres:5432`.
+   - Host → container: `localhost:<published-port>`.
+   - Other device → host: Tailscale IP/hostname, public IP, or domain.
 
-4. **Banco e cache ficam privados por padrão.**
-   - Não publicar PostgreSQL, Redis, Timescale etc. no host se não houver necessidade real.
+4. **Databases and caches stay private by default.**
+   - Do not publish PostgreSQL, Redis, Timescale, etc. on the host unless there is a real need.
 
-5. **Persistência é obrigatória para dados.**
-   - Bancos, Redis persistente, uploads e outros dados precisam de volumes/bind mounts adequados.
+5. **Persistence is mandatory for data.**
+   - Databases, persistent Redis, uploads, and other data need proper volumes/bind mounts.
 
-6. **Produção não depende de `synchronize=true`.**
-   - Preferir migrations.
-   - `synchronize` só pode ser oferecido como bootstrap temporário de banco novo e vazio, com aviso explícito.
+6. **Production does not depend on `synchronize=true`.**
+   - Prefer migrations.
+   - `synchronize` may only be offered as a temporary bootstrap for a brand-new, empty database, with an explicit warning.
 
-7. **Secrets nunca vão para Git.**
-   - Usar `.env.production`, secret manager ou equivalente.
-   - Garantir `.gitignore`.
+7. **Secrets never go to Git.**
+   - Use `.env.production`, a secret manager, or equivalent.
+   - Ensure `.gitignore`.
 
-8. **Frontend Vite é build-time.**
-   - Mudança em `VITE_*` exige rebuild.
-   - Não usar `localhost` como URL de API quando o frontend será aberto em outro dispositivo.
+8. **Vite frontend is build-time.**
+   - Changing any `VITE_*` requires a rebuild.
+   - Do not use `localhost` as the API URL when the frontend will be opened from another device.
 
-9. **HTTPS e API devem preferencialmente compartilhar origem.**
-   - Preferir `/api` atrás de reverse proxy a URLs/portas diferentes.
-   - Evitar mixed content e reduzir CORS.
+9. **HTTPS and the API should preferably share an origin.**
+   - Prefer `/api` behind a reverse proxy over different URLs/ports.
+   - Avoid mixed content and reduce CORS.
 
-10. **Toda implantação termina com validação.**
+10. **Every deployment ends with validation.**
     - containers;
     - health endpoint;
-    - banco;
+    - database;
     - frontend;
     - frontend → API;
-    - persistência;
+    - persistence;
     - restart;
-    - acesso externo escolhido.
+    - chosen external access.
 
 ---
 
-# Fluxo operacional
+# Operational flow
 
-## Fase 0 — Determinar o alvo
+## Phase 0 — Determine the target
 
-Identificar:
+Identify:
 
-- projeto/repositório;
-- host de destino;
-- sistema operacional e arquitetura;
-- se já há outros projetos rodando;
-- se o usuário quer apenas preparar arquivos ou executar o deploy.
+- project/repository;
+- destination host;
+- operating system and architecture;
+- whether other projects are already running;
+- whether the user wants to prepare files only or actually run the deploy.
 
-Se o usuário não escolher o nível de exposição, apresentar:
+If the user has not chosen the exposure level, present:
 
-**Opção A — Local**
-- acesso somente no host.
+**Option A — Local**
+- access only on the host.
 
-**Opção B — Privado via Tailscale HTTP**
-- rápido para equipe/homologação.
+**Option B — Private via Tailscale HTTP**
+- fast for a team/staging.
 
-**Opção C — Privado via Tailscale HTTPS**
-- Tailscale Serve e hostname `*.ts.net`.
+**Option C — Private via Tailscale HTTPS**
+- Tailscale Serve and `*.ts.net` hostname.
 
-**Opção D — Público com domínio + HTTPS**
-- reverse proxy central, DNS e TLS.
+**Option D — Public with domain + HTTPS**
+- central reverse proxy, DNS, and TLS.
 
-Não escolher silenciosamente uma opção quando isso alterar exposição ou segurança.
+Do not silently pick an option when it changes exposure or security.
 
 ---
 
-# Fase 1 — Auditoria do host
+## Phase 1 — Host audit
 
-Antes de escolher portas:
+Before choosing ports:
 
 ```bash
 docker ps
@@ -108,7 +108,7 @@ docker ps -a
 sudo lsof -nP -iTCP -sTCP:LISTEN
 ```
 
-Em macOS + Colima:
+On macOS + Colima:
 
 ```bash
 colima status
@@ -116,31 +116,31 @@ docker --version
 docker-compose --version || docker compose version
 ```
 
-Se necessário, identificar processos:
+If needed, identify processes:
 
 ```bash
 ps -p PID -o pid,ppid,command
 lsof -a -p PID -d cwd
 ```
 
-Registrar:
+Record:
 
-- portas ocupadas;
-- containers existentes;
-- nomes já usados;
-- reverse proxies existentes;
+- occupied ports;
+- existing containers;
+- already-used names;
+- existing reverse proxies;
 - Tailscale;
-- recursos relevantes do host.
+- relevant host resources.
 
-Não modificar serviços encontrados apenas porque parecem conflitantes. Primeiro escolher outra porta ou apresentar a decisão.
+Do not modify services just because they look conflicting. First pick another port or present the decision.
 
 ---
 
-# Fase 2 — Auditoria do projeto
+## Phase 2 — Project audit
 
-Inspecionar antes de escrever Compose.
+Inspect before writing Compose.
 
-Arquivos prioritários:
+Priority files:
 
 ```text
 package.json
@@ -156,62 +156,62 @@ next.config.*
 README*
 ```
 
-Descobrir:
+Find out:
 
-- frontend e framework;
-- backend e framework;
-- comando de build;
-- comando de runtime;
-- porta interna;
-- endpoint de health;
-- banco;
+- frontend and framework;
+- backend and framework;
+- build command;
+- runtime command;
+- internal port;
+- health endpoint;
+- database;
 - cache;
-- filas;
+- queues;
 - storage;
 - WebSockets;
-- serviços externos;
+- external services;
 - migrations;
-- variáveis obrigatórias.
+- required variables.
 
-Para NestJS/TypeORM, procurar:
+For NestJS/TypeORM, look for:
 
 ```bash
 grep -R "TypeOrmModule\|DATABASE_URL\|DB_HOST\|ConfigService\|config.get" src --include="*.ts"
 ```
 
-Para envs:
+For envs:
 
 ```bash
 grep -R "process.env" src --include="*.ts"
 ```
 
-Para Vite:
+For Vite:
 
 ```bash
 grep -R "VITE_" . --exclude-dir=node_modules --exclude-dir=dist
 ```
 
-Não assumir que `DATABASE_HOST` existe se o projeto usa `DATABASE_URL`.
+Do not assume `DATABASE_HOST` exists if the project uses `DATABASE_URL`.
 
 ---
 
-# Fase 3 — Escolher arquitetura
+## Phase 3 — Choose architecture
 
-## Opção A — Aplicação simples
+## Option A — Simple application
 
 ```text
-frontend ou API
+frontend or API
 └── container
 ```
 
-## Opção B — Frontend + API
+## Option B — Frontend + API
 
 ```text
 frontend
 API
 ```
 
-## Opção C — Stack comum
+## Option C — Common stack
 
 ```text
 frontend
@@ -220,7 +220,7 @@ PostgreSQL/PostGIS
 Redis
 ```
 
-## Opção D — Stack com telemetria
+## Option D — Stack with telemetry
 
 ```text
 frontend
@@ -230,67 +230,67 @@ Redis
 TimescaleDB
 ```
 
-## Opção E — Dependências externas
+## Option E — External dependencies
 
-Manter banco/cache/storage gerenciados externamente quando o projeto já depender deles e a migração não tiver sido solicitada.
+Keep database/cache/storage managed externally when the project already depends on them and migrating was not requested.
 
 ---
 
-# Fase 4 — Estratégia de banco
+## Phase 4 — Database strategy
 
-Apresentar a opção aplicável.
+Present the applicable option.
 
-## A. Banco novo com migrations
+## A. New database with migrations
 
-Preferida.
+Preferred.
 
 ```text
 models/entities
 → migrations
-→ banco
+→ database
 ```
 
-Executar somente migrations compatíveis com o projeto.
+Run only migrations compatible with the project.
 
-## B. Bootstrap temporário
+## B. Temporary bootstrap
 
-Somente para banco novo, vazio e quando o framework suporta criação automática.
+Only for a brand-new, empty database when the framework supports automatic creation.
 
-Exemplo TypeORM:
+TypeORM example:
 
 ```ts
 synchronize: env !== 'production'
 ```
 
-Procedimento:
+Procedure:
 
-1. confirmar banco vazio;
-2. ativar sincronização temporariamente;
-3. iniciar API;
-4. verificar tabelas;
-5. voltar imediatamente a `NODE_ENV=production`;
-6. recriar API;
-7. planejar migrations para mudanças futuras.
+1. confirm the database is empty;
+2. enable sync temporarily;
+3. start the API;
+4. verify tables;
+5. switch back to `NODE_ENV=production` immediately;
+6. recreate the API;
+7. plan migrations for future changes.
 
-Nunca manter essa opção como padrão de produção.
+Never keep this option as the production default.
 
-## C. Banco existente
+## C. Existing database
 
-- obter dump/backup;
-- restaurar;
-- verificar extensões;
-- validar schema;
-- executar migrations pendentes somente depois.
+- obtain dump/backup;
+- restore;
+- verify extensions;
+- validate schema;
+- run pending migrations only afterward.
 
-Não sobrescrever banco existente sem confirmação.
+Do not overwrite an existing database without confirmation.
 
 ---
 
-# Fase 5 — Dockerfiles
+## Phase 5 — Dockerfiles
 
-## Backend Node/NestJS base
+## Node/NestJS backend base
 
-Adaptar ao projeto real:
+Adapt to the real project:
 
 ```dockerfile
 FROM node:20-alpine AS build
@@ -311,15 +311,15 @@ EXPOSE 3000
 CMD ["node", "dist/main.js"]
 ```
 
-Se o lockfile não estiver confiável, não forçar `npm ci`; estabilizar dependências primeiro.
+If the lockfile is not trustworthy, do not force `npm ci`; stabilize dependencies first.
 
-NestJS deve normalmente ouvir:
+NestJS should normally listen on:
 
 ```ts
 await app.listen(process.env.PORT || 3000, '0.0.0.0');
 ```
 
-## Frontend Vite base
+## Vite frontend base
 
 ```dockerfile
 FROM node:20-alpine AS build
@@ -337,15 +337,15 @@ EXPOSE 3000
 CMD ["sh", "-c", "serve -s dist -l ${PORT:-3000}"]
 ```
 
-Se houver Nginx/Caddy já adotado pelo projeto, preservar a arquitetura quando adequada.
+If the project already uses Nginx/Caddy, preserve that architecture when appropriate.
 
 ---
 
-# Fase 6 — Compose
+## Phase 6 — Compose
 
-Gerar nomes exclusivos por projeto.
+Generate unique names per project.
 
-Exemplo conceitual:
+Conceptual example:
 
 ```yaml
 services:
@@ -384,9 +384,9 @@ volumes:
   PROJECT_pgdata:
 ```
 
-Adicionar Redis/Timescale somente quando o projeto realmente usar.
+Add Redis/Timescale only when the project actually uses them.
 
-Entre containers:
+Between containers:
 
 ```text
 postgres:5432
@@ -394,57 +394,57 @@ redis:6379
 timescale:5432
 ```
 
-Nunca:
+Never:
 
 ```text
 localhost:5432
 ```
 
-para comunicação container → container.
+for container → container communication.
 
 ---
 
-# Fase 7 — Portas
+## Phase 7 — Ports
 
-Se não houver reverse proxy central, reservar portas sem conflito.
+If there is no central reverse proxy, reserve non-conflicting ports.
 
-Exemplo de convenção:
+Example convention:
 
 ```text
-Projeto A  front 8080  api 3000
-Projeto B  front 8081  api 3001
-Projeto C  front 8082  api 3002
+Project A  front 8080  api 3000
+Project B  front 8081  api 3001
+Project C  front 8082  api 3002
 ```
 
-A convenção é exemplo, não obrigação. Sempre verificar o host antes.
+The convention is an example, not an obligation. Always check the host first.
 
-Banco/cache não recebem porta pública por padrão.
+Databases/caches get no public port by default.
 
 ---
 
-# Fase 8 — Frontend → API
+## Phase 8 — Frontend → API
 
-## Opção A — Navegador no próprio host
+## Option A — Browser on the host itself
 
 ```env
 VITE_API_URL=http://localhost:3000
 ```
 
-## Opção B — Outro dispositivo via Tailscale
+## Option B — Another device via Tailscale
 
 ```env
 VITE_API_URL=http://TAILSCALE_IP:API_PORT
 ```
 
-O dispositivo cliente precisa alcançar a Tailnet.
+The client device must be able to reach the Tailnet.
 
-## Opção C — Reverse proxy / mesma origem — preferida
+## Option C — Reverse proxy / same origin — preferred
 
 ```env
 VITE_API_URL=/api
 ```
 
-Topologia:
+Topology:
 
 ```text
 https://host/
@@ -452,15 +452,15 @@ https://host/
 └── /api   → backend
 ```
 
-Após alterar qualquer `VITE_*`, rebuildar a imagem do frontend.
+After changing any `VITE_*`, rebuild the frontend image.
 
 ---
 
-# Fase 9 — Exposição
+## Phase 9 — Exposure
 
 ## A. Local
 
-Validar com:
+Validate with:
 
 ```bash
 curl http://localhost:PORT/health
@@ -468,23 +468,23 @@ curl http://localhost:PORT/health
 
 ## B. Tailscale HTTP
 
-Acessar:
+Access:
 
 ```text
 http://TAILSCALE_IP:PORT
 ```
 
-ou hostname MagicDNS quando aplicável.
+or the MagicDNS hostname when applicable.
 
 ## C. Tailscale HTTPS
 
-No macOS com app Tailscale, o CLI pode estar em:
+On macOS with the Tailscale app, the CLI may be at:
 
 ```bash
 /Applications/Tailscale.app/Contents/MacOS/Tailscale
 ```
 
-Exemplo:
+Example:
 
 ```bash
 /Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg http://localhost:8080
@@ -496,26 +496,26 @@ Status:
 /Applications/Tailscale.app/Contents/MacOS/Tailscale serve status
 ```
 
-Desativar configuração HTTPS na porta 443:
+Disable HTTPS config on port 443:
 
 ```bash
 /Applications/Tailscale.app/Contents/MacOS/Tailscale serve --https=443 off
 ```
 
-Antes de substituir uma configuração Serve existente, inspecionar `serve status`.
+Inspect `serve status` before replacing an existing Serve configuration.
 
-## D. Domínio público + HTTPS
+## D. Public domain + HTTPS
 
-Preferir reverse proxy central:
+Prefer a central reverse proxy:
 
 ```text
 Internet
 → 443
 → Caddy/Nginx/Traefik
-→ projeto
+→ project
 ```
 
-Para múltiplos projetos:
+For multiple projects:
 
 ```text
 app-a.example.com → A
@@ -523,33 +523,33 @@ app-b.example.com → B
 app-c.example.com → C
 ```
 
-Não expor banco/cache.
+Do not expose databases/caches.
 
 ---
 
-# Fase 10 — Secrets
+## Phase 10 — Secrets
 
-Criar arquivo de produção separado, por exemplo:
+Create a separate production file, for example:
 
 ```env
 POSTGRES_PASSWORD=...
 JWT_SECRET=...
 ```
 
-Garantir:
+Ensure:
 
 ```gitignore
 .env.production
 .env*.local
 ```
 
-Não imprimir secrets completos em relatórios ou logs.
+Do not print full secrets in reports or logs.
 
 ---
 
-# Fase 11 — Deploy
+## Phase 11 — Deploy
 
-Escolher o comando compatível com o host.
+Choose the command compatible with the host.
 
 Standalone:
 
@@ -560,7 +560,7 @@ docker-compose \
   up -d --build
 ```
 
-Plugin moderno:
+Modern plugin:
 
 ```bash
 docker compose \
@@ -569,11 +569,11 @@ docker compose \
   up -d --build
 ```
 
-Não trocar automaticamente entre ambos se um deles já foi validado no host.
+Do not silently switch between both when one has already been validated on the host.
 
 ---
 
-# Fase 12 — Validação obrigatória
+## Phase 12 — Mandatory validation
 
 ## Containers
 
@@ -599,13 +599,13 @@ docker-compose -f docker-compose.prod.yml logs --tail=100 api
 curl -i http://localhost:API_PORT/health
 ```
 
-## Banco
+## Database
 
 ```bash
 docker exec PROJECT-postgres pg_isready -U USER -d DATABASE
 ```
 
-Quando necessário:
+When needed:
 
 ```bash
 docker exec -it PROJECT-postgres psql -U USER -d DATABASE -c '\dt'
@@ -617,29 +617,137 @@ docker exec -it PROJECT-postgres psql -U USER -d DATABASE -c '\dt'
 curl -I http://localhost:FRONT_PORT
 ```
 
-## Remoto
+## Remote
 
-Validar do dispositivo que realmente consumirá o sistema.
+Validate from the device that will actually consume the system.
 
-Se frontend abre mas login retorna `Failed to fetch`, verificar:
+If the frontend opens but login returns `Failed to fetch`, check:
 
-1. URL efetiva da API no bundle;
-2. `localhost` incorreto;
+1. the effective API URL in the bundle;
+2. wrong `localhost`;
 3. CORS;
 4. mixed content;
 5. firewall/Tailscale;
-6. porta publicada;
+6. published port;
 7. API health.
 
 ---
 
-# Diagnóstico rápido
+## Phase 13 — Deploy automation on git push (webhook + Tailscale Funnel)
 
-## `ECONNREFUSED` no banco
+Latest-latency option: every push to a specific branch redeploys the host automatically.
 
-Verificar se a aplicação usa `localhost`.
+```text
+git push (GitHub)
+→ webhook POST https://hostname.ts.net/hooks/project
+→ Tailscale Funnel (public HTTPS, *.ts.net)
+→ local receiver validates HMAC + branch
+→ scripts/deploy.sh (background)
+→ docker compose up -d --build + frontend rebuild + healthchecks
+```
 
-Container → Postgres deve normalmente usar:
+Choose this path only when the user wants push-triggered deploys and accepts a public endpoint.
+
+## 13.1 Components
+
+- **Receiver** — small HTTP server (e.g., Node.js, zero dependencies) listening on 127.0.0.1:PORT. It:
+  1. validates `X-Hub-Signature-256` (HMAC-SHA256 of the raw body with the webhook secret) using a timing-safe comparison;
+  2. checks `X-GitHub-Event` is `push` and `payload.ref === 'refs/heads/main'` (or the chosen branch);
+  3. replies `202` immediately and runs `deploy.sh` in background (detached).
+- **deploy.sh** — `git fetch` + `git merge --ff-only` + `docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build api` + frontend rebuild/recreate + healthchecks. Use a lock file (`.deploy/deploy.lock`) so two pushes never run concurrently.
+- **LaunchAgent** (`~/Library/LaunchAgents/com.<org>.<project>-webhook.plist`) — keeps the receiver alive with `KeepAlive`, passing the secret via `EnvironmentVariables` (never in the repo).
+
+Example `deploy.sh` skeleton:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mkdir -p .deploy
+[ -e .deploy/deploy.lock ] && { echo "deploy in progress"; exit 1; }
+trap 'rm -f .deploy/deploy.lock' EXIT
+touch .deploy/deploy.lock
+
+git fetch origin main
+git merge --ff-only FETCH_HEAD
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build api
+docker build -q -t PROJECT-front web/
+docker rm -f PROJECT-front >/dev/null 2>&1 || true
+docker run -d --name PROJECT-front --restart unless-stopped -p 8080:3000 PROJECT-front
+for i in $(seq 1 20); do
+  curl -fsS http://localhost:3000/health && break || sleep 2
+done
+curl -fsSI http://localhost:8080 >/dev/null
+```
+
+## 13.2 Enable Tailscale Funnel (public HTTPS)
+
+Funnel routes public internet traffic to a local port over HTTPS on `*.ts.net`; it is the only way a GitHub webhook reaches a host on the Tailnet. Steps:
+
+1. **Admin console** (login.tailscale.com) → **Settings → Funnel → Enable** for the target node. Enabling writes the ACL rule automatically.
+2. **If flow at the ACL level is still blocked**, add the explicit Funnel rule to Access Controls:
+
+```js
+// tailscale-funnel
+{
+  "action": "accept",
+  "src": ["*"],
+  "dst": ["<NODE_IP>:443", "<NODE_IP>:<SERVICE_PORT>"],
+}
+```
+
+The rule must appear as a second rule; `:443` is required for the HTTPS endpoint. Port `<SERVICE_PORT>` is now public on the internet — always protect it with the webhook secret.
+
+3. From the CLI:
+
+```bash
+/Applications/Tailscale.app/Contents/MacOS/Tailscale funnel --bg 8787
+```
+
+`--bg` is required (without it the config is removed when the process exits). Check:
+
+```bash
+/Applications/Tailscale.app/Contents/MacOS/Tailscale funnel status
+```
+
+## 13.3 Create the GitHub webhook
+
+```bash
+SECRET=$(openssl rand -hex 32)   # store out of the repo, chmod 600
+gh api repos/OWNER/REPO/hooks -X POST --input - <<'JSON'
+{
+  "name": "web",
+  "active": true,
+  "events": ["push", "ping"],
+  "config": {
+    "url": "https://<hostname>.ts.net/hooks/project",
+    "content_type": "json",
+    "secret": "PASTE_SECRET"
+  }
+}
+JSON
+```
+
+## 13.4 Diagnostics
+
+| Symptom | Cause / fix |
+|---------|-------------|
+| GitHub delivery `failed to connect to host`, but `curl` works locally | Funnel blocked at the control plane: enable it in Settings → Funnel and/or add the `tailscale-funnel` ACL rule with `:443` |
+| Delivery `OK` but nothing deployed | Check receiver logs and `deploy.lock` (a stale lock is removed by the receiver on exit) |
+| `TypeError [ERR_INVALID_ARG_VALUE]: argument 'stdio' is invalid` | Passing a lazily-opened `WriteStream` (fd `null`) to `spawn` stdio fails. Use `fs.openSync(LOG, 'a')` and pass the fd |
+| Receiver validates branch incorrectly | GitHub sends all branches; filter by `payload.ref` |
+
+Validation: trigger `POST /hooks/project` with a correctly signed body for `refs/heads/main` and expect `202`; then follow `.deploy/deploy.log` and `docker ps`.
+
+---
+
+# Quick troubleshooting
+
+## `ECONNREFUSED` on the database
+
+Check whether the application uses `localhost`.
+
+Container → Postgres should normally use:
 
 ```text
 postgres:5432
@@ -647,29 +755,29 @@ postgres:5432
 
 ## `relation "usuarios" does not exist`
 
-A conexão funciona; schema não existe.
+The connection works; the schema does not exist.
 
-Resolver com migration, restore ou bootstrap explicitamente escolhido.
+Resolve with a migration, restore, or an explicitly chosen bootstrap.
 
-## `Failed to fetch` fora do servidor
+## `Failed to fetch` outside the server
 
-Se o bundle contém:
+If the bundle contains:
 
 ```env
 VITE_API_URL=http://localhost:3000
 ```
 
-o browser procura a API na máquina cliente.
+the browser looks for the API on the client machine.
 
-Usar endereço acessível ou `/api`.
+Use a reachable address or `/api`.
 
-## HTTPS + API HTTP
+## HTTPS + HTTP API
 
-Possível mixed content.
+Possible mixed content.
 
-Preferir mesma origem HTTPS com `/api`.
+Prefer same-origin HTTPS with `/api`.
 
-## Vite continua usando URL antiga
+## Vite keeps using the old URL
 
 Rebuild:
 
@@ -677,15 +785,15 @@ Rebuild:
 docker build --no-cache -t PROJECT-front .
 ```
 
-## Porta aparentemente ocupada por `ssh` no macOS/Colima
+## Port seemingly occupied by `ssh` on macOS/Colima
 
-Não presumir processo indevido. Inspecionar antes; Colima pode usar encaminhamento SSH para portas publicadas pelos containers.
+Do not assume a wrongful process. Inspect first; Colima may use SSH forwarding for ports published by containers.
 
 ---
 
-# Operações destrutivas
+# Destructive operations
 
-## Permitidas somente com intenção explícita
+## Allowed only with explicit intent
 
 ```bash
 docker-compose down -v
@@ -694,132 +802,133 @@ docker system prune --volumes
 rm -rf ...
 ```
 
-Antes de qualquer operação destrutiva:
+Before any destructive operation:
 
-- identificar projeto;
-- identificar volume;
-- explicar impacto;
-- confirmar que existe backup quando houver dados importantes.
+- identify the project;
+- identify the volume;
+- explain the impact;
+- confirm a backup exists when important data is involved.
 
-Parar containers sem apagar volumes é diferente de apagar persistência.
+Stopping containers without deleting volumes is different from deleting persistence.
 
 ---
 
-# Perfis de implantação
+# Deployment profiles
 
-## Perfil 1 — Desenvolvimento interno
+## Profile 1 — Internal development
 
 ```text
 Docker/Compose
-portas individuais
-Tailscale HTTP opcional
+individual ports
+optional Tailscale HTTP
 volumes
 ```
 
-## Perfil 2 — Homologação privada
+## Profile 2 — Private staging
 
 ```text
 Docker/Compose
 Tailscale
-HTTPS privado
+private HTTPS
 migrations
 backup
-frontend/API mesma origem quando possível
+frontend/API same origin when possible
 ```
 
-## Perfil 3 — Produção pública
+## Profile 3 — Public production
 
 ```text
 Docker/Compose
-reverse proxy central
-domínio
+central reverse proxy
+domain
 HTTPS
 migrations
-backup automatizado
-monitoramento
+automated backup
+monitoring
 health checks
 secrets
 rollback
-exposição mínima
+minimal exposure
 ```
 
 ---
 
-# Checklist final
+# Final checklist
 
-Antes de declarar sucesso:
+Before declaring success:
 
 ```text
-[ ] Stack real identificada
-[ ] Dependências reais identificadas
-[ ] Variáveis reais identificadas
-[ ] Portas livres verificadas
-[ ] Containers com nomes exclusivos
-[ ] Volumes exclusivos
-[ ] Secrets fora do Git
-[ ] Banco/cache não expostos desnecessariamente
-[ ] Estratégia de migrations definida
+[ ] Real stack identified
+[ ] Real dependencies identified
+[ ] Real variables identified
+[ ] Free ports verified
+[ ] Unique container names
+[ ] Unique volumes
+[ ] Secrets outside Git
+[ ] Database/cache not unnecessarily exposed
+[ ] Migrations strategy defined
 [ ] API health OK
 [ ] Frontend OK
-[ ] Frontend chama a API correta
-[ ] Acesso remoto escolhido funciona
-[ ] HTTPS validado quando aplicável
-[ ] Restart policy configurada
-[ ] Dados sobrevivem a restart
-[ ] Serviços existentes permaneceram intactos
-[ ] Comandos de operação/rollback documentados
+[ ] Frontend calls the correct API
+[ ] Chosen remote access works
+[ ] HTTPS validated when applicable
+[ ] Restart policy set
+[ ] Data survives restart
+[ ] Existing services remained intact
+[ ] Operation/rollback commands documented
+[ ] Push automation (if chosen): webhook delivery OK, validate branch filter, deploy lock works
 ```
 
 ---
 
-# Formato da resposta da skill
+# Skill response format
 
-Ao implementar, responder por etapas e apresentar decisões relevantes como opções.
+When implementing, answer step by step and present relevant decisions as options.
 
-Exemplo:
+Example:
 
 ```text
-Diagnóstico
+Diagnosis
 - stack:
-- serviços:
-- portas ocupadas:
-- riscos:
+- services:
+- occupied ports:
+- risks:
 
-Escolha de exposição
+Exposure choice
 A. Local
 B. Tailscale HTTP
 C. Tailscale HTTPS
-D. Domínio público
+D. Public domain
 
-Plano selecionado
+Selected plan
 - ...
 
-Arquivos a criar/alterar
+Files to create/change
 - ...
 
-Comandos
+Commands
 - ...
 
-Validação
+Validation
 - ...
 
 Rollback
 - ...
 ```
 
-Não despejar dezenas de comandos antes de confirmar decisões que alterem exposição pública, banco existente ou dados persistentes.
+Do not dump dozens of commands before confirming decisions that change public exposure, an existing database, or persistent data.
 
 ---
 
-# Regra de ouro
+# Golden rule
 
-Antes de qualquer alteração, responder internamente a estas perguntas:
+Before any change, answer these questions internally:
 
-1. O que já está rodando neste host?
-2. Como este projeto realmente lê suas configurações?
-3. Quais dados precisam sobreviver?
-4. Quem precisa acessar o projeto e de onde?
-5. Qual endereço é válido em cada contexto: container, host e cliente remoto?
-6. Como reverter esta alteração sem perder dados?
+1. What is already running on this host?
+2. How does this project really read its configuration?
+3. Which data must survive?
+4. Who needs to access the project, and from where?
+5. Which address is valid in each context: container, host, and remote client?
+6. How do I revert this change without losing data?
 
-Se alguma resposta essencial estiver desconhecida, investigar antes de executar.
+If any essential answer is unknown, investigate before executing.
