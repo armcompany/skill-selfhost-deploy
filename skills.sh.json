@@ -1,0 +1,11 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "notGrouped": "bottom",
+  "groupings": [
+    {
+      "title": "DevOps & Self-Hosting",
+      "description": "Skills for planning, deploying, and diagnosing self-hosted infrastructure.",
+      "skills": ["selfhost-deploy"]
+    }
+  ]
+}
