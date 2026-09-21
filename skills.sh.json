@@ -4,7 +4,7 @@
   "groupings": [
     {
       "title": "DevOps & Self-Hosting",
-      "description": "Skills for planning, deploying, and diagnosing self-hosted infrastructure.",
+      "description": "Skills for planning, deploying, and diagnosing self-hosted infrastructure. (v2 EN reindex)",
       "skills": ["selfhost-deploy"]
     }
   ]
