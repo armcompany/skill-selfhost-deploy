@@ -1,6 +1,6 @@
 ---
 name: selfhost-deploy
-description: Use when deploying, planning, or diagnosing self-hosted projects with Docker/Compose on macOS + Colima or Linux VPS, preserving existing services and offering explicit choices for access, database, proxy, HTTPS, and persistence. Also use to automate deploy-on-git-push via GitHub webhook and Tailscale Funnel.
+description: Use when deploying, planning, or diagnosing self-hosted projects with Docker/Compose on macOS + Colima or Linux VPS, preserving existing services and offering explicit choices for access, database, proxy, HTTPS, and persistence. Also use to automate deploy-on-git-push via GitHub webhook and Tailscale Funnel, and to guarantee the full stack (Colima, Docker, containers, cloudflared, Tailscale) auto-recovers without manual intervention after a macOS reboot, power loss, update, or crash.
 ---
 
 # selfhost-deploy
@@ -65,6 +65,10 @@ The skill must **investigate before changing**. Never assume variable names, por
     - persistence;
     - restart;
     - chosen external access.
+
+11. **"Deploy works right now" is not the same as "deploy is done."**
+    - Persistence, auto-start after reboot/power loss, health checks, dependency ordering, external access, and a documented rollback are part of "done," not optional extras.
+    - When the host is a persistent server (e.g., a Mac acting as a server), never declare success solely from `up -d --build`; the full stack must also come back on its own after the machine restarts, with no Terminal, `nohup`, `screen`, or `tmux` involved.
 
 ---
 
@@ -741,6 +745,209 @@ Validation: trigger `POST /hooks/project` with a correctly signed body for `refs
 
 ---
 
+## Phase 14 — Boot & power-loss recovery (macOS server)
+
+Use this phase whenever the host is a persistent macOS machine (e.g., a Mac mini/M1 acting as a server) that must recover the **entire** stack automatically after a reboot, power failure, macOS update, or unexpected shutdown — with nobody opening a Terminal or typing a command.
+
+Expected chain:
+
+```text
+macOS boots
+  ↓
+Colima starts automatically
+  ↓
+Docker Engine becomes available
+  ↓
+containers with a restart policy come back
+  ↓
+project containers (API/DB/cache/frontend) return healthy
+  ↓
+cloudflared comes back
+  ↓
+Cloudflare Tunnel connects
+  ↓
+public hostnames (*.yourdomain) are online
+
+(in parallel)
+
+macOS boots → Tailscale comes back → SSH / private admin access
+```
+
+"Deploy" and "auto-recovering deploy" are different deliverables. Do not treat this phase as optional polish.
+
+### 14.1 Audit the current state first
+
+Never install a new LaunchAgent/LaunchDaemon or reinstall a service before checking what already exists. Run:
+
+```bash
+brew services list
+colima status
+docker info
+docker ps
+launchctl list | grep -Ei "colima|cloudflared|tailscale|docker"
+ps aux | grep '[c]loudflared'
+```
+
+Also inspect existing plists:
+
+```bash
+ls -la ~/Library/LaunchAgents ~/Library/LaunchDaemons 2>/dev/null
+ls -la /Library/LaunchDaemons 2>/dev/null
+grep -l -Ei "colima|cloudflared|tailscale|docker" ~/Library/LaunchAgents/*.plist /Library/LaunchDaemons/*.plist 2>/dev/null
+```
+
+Do not create a duplicate service for something that is already registered and working. If something is already correctly configured, only validate it — do not touch it.
+
+### 14.2 Colima auto-start
+
+Investigate the actually installed version and its supported mechanism before creating anything:
+
+```bash
+colima version
+brew info colima   # Homebrew formulas sometimes print autostart caveats
+colima --help | grep -i -A3 'start\|daemon\|service'
+```
+
+Prefer, in this order:
+
+1. A native/official mechanism exposed by the installed Colima version (check its own docs/`--help`/release notes for the version in use — do not assume flags that may not exist).
+2. A Homebrew-provided service definition, if `brew services` lists one for `colima`.
+3. Only as a fallback, a **LaunchAgent** (not a LaunchDaemon) under `~/Library/LaunchAgents/`, because Colima's VM runs in the user's session. Use `RunAtLoad` (and `KeepAlive` only if idempotent) to run `colima start` with the correct profile/runtime flags used in production.
+
+Critical nuance: a LaunchAgent only starts once the user logs in — not at raw boot. If nobody is expected to log in physically after a reboot, this requires **Automatic Login** to be enabled for that user (System Settings → Users & Groups → Login Options). Note that **FileVault disables automatic login**; if FileVault is enabled, decide explicitly with the user whether to trade that security control for unattended recovery — do not disable FileVault silently.
+
+Validate:
+
+```bash
+colima status
+docker info
+```
+
+### 14.3 Docker container restart policies
+
+Audit every project's containers, not just the one being deployed:
+
+```bash
+docker inspect -f '{{.Name}} -> {{.HostConfig.RestartPolicy.Name}}' $(docker ps -aq)
+```
+
+Every production container must use `restart: unless-stopped` (see Phase 6). Apply it in the Compose file that is the actual source of truth for that project — not with an ad-hoc `docker update --restart` on a running container that will be lost on the next `up --build`.
+
+This restart policy is inert until Docker itself is reachable, so 14.2 (Colima) and 14.3 (restart policies) only deliver recovery **together**.
+
+### 14.4 cloudflared auto-start
+
+If a tunnel (e.g., `cloudflared tunnel run <name>`) was installed as a service (`cloudflared service install`), verify — do not reinstall blindly:
+
+```bash
+launchctl list | grep -i cloudflared
+ps aux | grep '[c]loudflared'
+sudo launchctl print system/com.cloudflare.cloudflared 2>/dev/null
+```
+
+`cloudflared service install` normally registers a system LaunchDaemon, which starts at boot without requiring a user login (unlike the Colima LaunchAgent case above). If it is already registered and running, only confirm in the Cloudflare dashboard that the tunnel is `Healthy`/`Connected`. Reinstalling an already-correct service risks duplicate/conflicting configs.
+
+### 14.5 Tailscale auto-start
+
+Verify Tailscale reconnects without touching the Tailnet configuration:
+
+```bash
+launchctl list | grep -i tailscale
+/Applications/Tailscale.app/Contents/MacOS/Tailscale status
+```
+
+The Tailscale macOS app and `tailscaled` are normally managed by the app/Homebrew installer's own launchd integration. Confirm it survives reboot; do not change ACLs, keys, or node settings as part of this phase. Tailscale remains the private/admin/SSH path; Cloudflare Tunnel remains the public path for applications — do not blur that boundary.
+
+### 14.6 Dependency ordering and health
+
+Do not rely on container start order alone. Combine:
+
+- `healthcheck` in Compose (see Phase 6 example);
+- `depends_on: condition: service_healthy` for direct dependents;
+- application-level retry/backoff when connecting to the database/cache;
+- readiness/liveness endpoints exposed by the API.
+
+An API must not crash-loop permanently just because Postgres took a few extra seconds to become ready after a cold boot.
+
+### 14.7 Nothing production-critical may depend on a Terminal session
+
+After this phase, none of Colima, Docker Engine, project containers (frontend/API/DB/cache/telemetry), cloudflared, or Tailscale may depend on an open Terminal window, `nohup`, `screen`, or `tmux`. Acceptable mechanisms are: launchd (LaunchAgent/LaunchDaemon), Homebrew services, and Docker's own `restart` policy.
+
+### 14.8 Reboot test protocol
+
+Before physically rebooting, walk through and show the user:
+
+1. volumes present and correct (`docker volume ls`);
+2. containers and their restart policy (14.3);
+3. Colima auto-start mechanism verified (14.2);
+4. cloudflared auto-start mechanism verified (14.4);
+5. Tailscale auto-start verified (14.5);
+6. no database migration/backup/long-running job currently in progress.
+
+**Ask for explicit confirmation before running `sudo reboot` or power-cycling the machine.**
+
+After the machine comes back, do **not** manually run `colima start`, `docker compose up`, `cloudflared tunnel run`, or equivalents. First check whether everything recovered on its own; manually starting something masks whether auto-recovery actually works.
+
+### 14.9 Post-reboot validation
+
+```bash
+colima status
+docker info
+docker ps
+ps aux | grep '[c]loudflared'
+```
+
+Check every project's containers are `Up` and healthy, then validate externally:
+
+- each public hostname over HTTPS (the actual domains configured for the tunnel);
+- login and at least one authenticated API call;
+- a database round-trip (not just "container is Up");
+- the Cloudflare Tunnel status (`Healthy`/`Connected` in the dashboard);
+- Tailscale/SSH access for private administration.
+
+### 14.10 Power-loss recovery
+
+Audit current power settings before changing anything:
+
+```bash
+pmset -g custom
+```
+
+Show the current state to the user first. If this Mac is dedicated to acting as a server, propose (do not silently apply):
+
+```bash
+sudo pmset -a autorestart 1
+```
+
+Also check that sleep is disabled for a headless server (`Sleep`/`disksleep`/`displaysleep` in `pmset -g custom`), since a sleeping Mac cannot serve traffic even though it is technically "on." Treat this like any other host-level change: show the before state, propose the after state, and apply only with explicit confirmation.
+
+### 14.11 Success criteria for this phase
+
+This phase is only complete when the full chain below works with zero manual intervention:
+
+```text
+power returns → Mac powers on → macOS boots
+  → Colima → Docker
+      → project containers (DB/API/frontend) per project
+          → cloudflared → Cloudflare → public hostnames online
+  (in parallel) → Tailscale → SSH/private admin
+```
+
+"Deploy works" and "deploy is done" are different states:
+
+```text
+Deploy
++ persistence
++ auto-start
++ health checks
++ reboot recovery
++ power-loss recovery
++ external access
++ documented rollback   = done
+```
+
+---
+
 # Quick troubleshooting
 
 ## `ECONNREFUSED` on the database
@@ -788,6 +995,18 @@ docker build --no-cache -t PROJECT-front .
 ## Port seemingly occupied by `ssh` on macOS/Colima
 
 Do not assume a wrongful process. Inspect first; Colima may use SSH forwarding for ports published by containers.
+
+## Colima doesn't come back after a reboot
+
+Check whether Colima's auto-start relies on a LaunchAgent (user-level). LaunchAgents only run after login — if the Mac does not auto-login, Colima stays stopped until someone logs in. Check `pmset`/login options and whether FileVault is blocking automatic login (14.2).
+
+## cloudflared shows `Down`/disconnected after a reboot but the process is running
+
+Check DNS/network readiness order — cloudflared may start before the network interface is fully up. Check `sudo launchctl print system/com.cloudflare.cloudflared` for exit/restart history rather than reinstalling the service.
+
+## Everything comes back except the app data looks reset
+
+The container returned, but its volume may not be the one previously containing data (e.g., an anonymous volume was recreated). Re-check `docker inspect` mounts and the Compose file's volume names (Phase 6), never assume a running container implies the same volume.
 
 ---
 
@@ -877,6 +1096,11 @@ Before declaring success:
 [ ] Existing services remained intact
 [ ] Operation/rollback commands documented
 [ ] Push automation (if chosen): webhook delivery OK, validate branch filter, deploy lock works
+[ ] For a persistent macOS server: Colima auto-start verified (with login/FileVault implications checked)
+[ ] For a persistent macOS server: cloudflared auto-start verified and tunnel Healthy/Connected
+[ ] For a persistent macOS server: Tailscale auto-start verified, SSH/admin access confirmed
+[ ] For a persistent macOS server: full reboot recovery tested end-to-end with no manual commands
+[ ] For a persistent macOS server: power-loss recovery (`pmset autorestart`) reviewed with the user
 ```
 
 ---
