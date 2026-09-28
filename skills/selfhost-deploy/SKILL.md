@@ -325,12 +325,72 @@ await app.listen(process.env.PORT || 3000, '0.0.0.0');
 
 ## Vite frontend base
 
+### Build-time configuration contract
+
+For a Vite frontend, use one source of truth for public build variables:
+
+```text
+<frontend>/.env.production
+```
+
+The file must contain the effective public API address, for example:
+
+```env
+VITE_API_URL=/api
+```
+
+Prefer this file over passing `VITE_*` through Docker build arguments. Do not mix
+the mechanisms: an `ARG` promoted to `ENV` in the Dockerfile can override the
+`.env.*` value that Vite would otherwise load, and forgetting the build flag can
+silently bake an unintended default.
+
+Before building, audit the frontend's `.dockerignore`:
+
+```bash
+test -f <frontend>/.env.production
+grep -n '^\.env\.production$\|^\.env\*' <frontend>/.dockerignore || true
+```
+
+`.env.production` must be present in the Docker build context. It may not be
+excluded by `.dockerignore`. It is valid to keep `.env` and `.env*.local`
+ignored, but do not use a broad rule that also removes `.env.production`.
+
+Add a fail-fast check immediately before `npm run build` (or equivalent):
+
+```dockerfile
+RUN test -f .env.production \
+  && grep -Eq '^VITE_API_URL=[^[:space:]]+' .env.production \
+  || (echo "ERROR: VITE_API_URL is required in .env.production" >&2; exit 1)
+RUN npm run build
+```
+
+The check verifies the file and key before Vite loads `.env.production` during
+the build.
+Do not add `ARG VITE_API_URL` or `ENV VITE_API_URL=...` to this Dockerfile when
+using the single-source pattern. If the project needs another build strategy,
+document it explicitly and validate that it cannot silently fall back.
+
+In application code, do not use this fallback because `undefined + '/api'`
+becomes the truthy string `undefined/api`:
+
+```ts
+const apiUrl = import.meta.env.VITE_API_URL
+  ? `${import.meta.env.VITE_API_URL}/api`
+  : '/api';
+```
+
+Adapt the path to the application's contract, but use an explicit ternary (or
+equivalent validation), never `import.meta.env.VITE_API_URL + '/api' || '/api'`.
+
 ```dockerfile
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
+RUN test -f .env.production \
+  && grep -Eq '^VITE_API_URL=[^[:space:]]+' .env.production \
+  || (echo "ERROR: VITE_API_URL is required in .env.production" >&2; exit 1)
 RUN npm run build
 
 FROM node:20-alpine AS runtime
@@ -458,6 +518,10 @@ https://host/
 
 After changing any `VITE_*`, rebuild the frontend image.
 
+For the preferred `/api` same-origin setup, the frontend build must receive
+`VITE_API_URL=/api` from `<frontend>/.env.production`; do not pass it again via
+Compose, `docker build --build-arg`, or Dockerfile `ARG/ENV`.
+
 ---
 
 ## Phase 9 — Exposure
@@ -533,7 +597,16 @@ Do not expose databases/caches.
 
 ## Phase 10 — Secrets
 
-Create a separate production file, for example:
+Keep configuration files separated by exposure:
+
+- Frontend `<frontend>/.env.production`: public `VITE_*` values only. Since
+  `VITE_*` is embedded in the browser bundle by definition, it is not a secret
+  and may be versioned when the repository's workflow permits it.
+- Backend/Compose secret file (for example `.env.production.private`):
+  passwords, JWT keys, tokens, and other secrets. Keep it outside Git and pass
+  it explicitly to Compose or the runtime.
+
+Example backend secret file:
 
 ```env
 POSTGRES_PASSWORD=...
@@ -543,9 +616,12 @@ JWT_SECRET=...
 Ensure:
 
 ```gitignore
-.env.production
 .env*.local
+.env.production.private
 ```
+
+Do not put a real secret in the frontend `.env.production`; anything prefixed
+with `VITE_` is public after the build.
 
 Do not print full secrets in reports or logs.
 
@@ -559,7 +635,7 @@ Standalone:
 
 ```bash
 docker-compose \
-  --env-file .env.production \
+  --env-file .env.production.private \
   -f docker-compose.prod.yml \
   up -d --build
 ```
@@ -568,10 +644,14 @@ Modern plugin:
 
 ```bash
 docker compose \
-  --env-file .env.production \
+  --env-file .env.production.private \
   -f docker-compose.prod.yml \
   up -d --build
 ```
+
+Use the actual path to the ignored backend/Compose secret file. The frontend's
+`<frontend>/.env.production` is consumed by Vite during the frontend image
+build and is not a replacement for Compose's runtime secret file.
 
 Do not silently switch between both when one has already been validated on the host.
 
@@ -621,9 +701,34 @@ docker exec -it PROJECT-postgres psql -U USER -d DATABASE -c '\dt'
 curl -I http://localhost:FRONT_PORT
 ```
 
+Inspect the built artifact and prove that it contains the intended API address.
+Use the actual URL (or a stable fragment) and the actual build output path:
+
+```bash
+grep -R -n -- "EXPECTED_API_URL" <frontend>/dist
+```
+
+If this returns no match, stop and diagnose the build context, `.dockerignore`,
+the active `.env.production`, and any Dockerfile `ARG/ENV` before exposing the
+container. Treat `undefined/api`, an old URL, or an unexpected `localhost` as a
+failed build.
+
 ## Remote
 
 Validate from the device that will actually consume the system.
+
+Then validate the public route and the real login request, not only the page:
+
+```bash
+curl -i https://PUBLIC_HOST/
+curl -i -X POST https://PUBLIC_HOST/ACTUAL_LOGIN_PATH \
+  -H 'Content-Type: application/json' \
+  --data '{"email":"validation@example.invalid","password":"invalid"}'
+```
+
+Use the project's real login path and payload. A `401` or `400` from the login
+endpoint is acceptable evidence that the browser reached the API; connection
+errors, a proxy `404`, and `Failed to fetch` are not.
 
 If the frontend opens but login returns `Failed to fetch`, check:
 
@@ -658,7 +763,7 @@ Choose this path only when the user wants push-triggered deploys and accepts a p
   1. validates `X-Hub-Signature-256` (HMAC-SHA256 of the raw body with the webhook secret) using a timing-safe comparison;
   2. checks `X-GitHub-Event` is `push` and `payload.ref === 'refs/heads/main'` (or the chosen branch);
   3. replies `202` immediately and runs `deploy.sh` in background (detached).
-- **deploy.sh** — `git fetch` + `git merge --ff-only` + `docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build api` + frontend rebuild/recreate + healthchecks. Use a lock file (`.deploy/deploy.lock`) so two pushes never run concurrently.
+- **deploy.sh** — `git fetch` + `git merge --ff-only` + `docker compose --env-file .env.production.private -f docker-compose.prod.yml up -d --build api` + frontend rebuild/recreate + healthchecks. Use a lock file (`.deploy/deploy.lock`) so two pushes never run concurrently.
 - **LaunchAgent** (`~/Library/LaunchAgents/com.<org>.<project>-webhook.plist`) — keeps the receiver alive with `KeepAlive`, passing the secret via `EnvironmentVariables` (never in the repo).
 
 Example `deploy.sh` skeleton:
@@ -674,7 +779,7 @@ touch .deploy/deploy.lock
 
 git fetch origin main
 git merge --ff-only FETCH_HEAD
-docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build api
+docker compose --env-file .env.production.private -f docker-compose.prod.yml up -d --build api
 docker build -q -t PROJECT-front web/
 docker rm -f PROJECT-front >/dev/null 2>&1 || true
 docker run -d --name PROJECT-front --restart unless-stopped -p 8080:3000 PROJECT-front
@@ -992,6 +1097,19 @@ Rebuild:
 docker build --no-cache -t PROJECT-front .
 ```
 
+Also verify all of the following before retrying:
+
+1. `<frontend>/.env.production` contains the intended `VITE_API_URL`;
+2. the frontend `.dockerignore` does not exclude `.env.production`;
+3. the Dockerfile has no competing `ARG/ENV VITE_API_URL`;
+4. the expected URL appears in `dist` after the build;
+5. the browser-facing URL and login request work from the consuming device.
+
+If the artifact contains `undefined/api`, the likely cause is either an
+excluded `.env.production` or the invalid JavaScript `+ '/api' || '/api'`
+fallback. Fix the source and rebuild; do not paper over it with a runtime
+container environment variable, because Vite has already embedded the value.
+
 ## Port seemingly occupied by `ssh` on macOS/Colima
 
 Do not assume a wrongful process. Inspect first; Colima may use SSH forwarding for ports published by containers.
@@ -1089,6 +1207,13 @@ Before declaring success:
 [ ] API health OK
 [ ] Frontend OK
 [ ] Frontend calls the correct API
+[ ] Frontend `.env.production` is the single Vite config source
+[ ] Frontend `.dockerignore` includes `.env.production` in the build context
+[ ] No competing Dockerfile `ARG/ENV VITE_*`
+[ ] Prebuild fails when `VITE_API_URL` is missing
+[ ] Expected API URL is present in `dist`
+[ ] Public URL works from the consuming device
+[ ] Login endpoint reaches the API (`401`/`400` acceptable for invalid credentials)
 [ ] Chosen remote access works
 [ ] HTTPS validated when applicable
 [ ] Restart policy set
