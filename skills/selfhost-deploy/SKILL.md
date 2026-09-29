@@ -1,6 +1,6 @@
 ---
 name: selfhost-deploy
-description: Use when deploying, planning, or diagnosing self-hosted projects with Docker/Compose on macOS + Colima or Linux VPS, preserving existing services and offering explicit choices for access, database, proxy, HTTPS, and persistence. Also use to automate deploy-on-git-push via GitHub webhook and Tailscale Funnel, and to guarantee the full stack (Colima, Docker, containers, cloudflared, Tailscale) auto-recovers without manual intervention after a macOS reboot, power loss, update, or crash.
+description: Plan, deploy, or diagnose a Docker/Compose application on macOS with Colima or a Linux VPS. Use when service preservation, access, persistence, HTTPS, rollback, or reboot recovery require an evidence-based deployment plan.
 ---
 
 # selfhost-deploy
@@ -16,6 +16,15 @@ Deploy projects repeatably and safely on self-hosted infrastructure, especially:
 - local access, private via Tailscale, or public via a domain.
 
 The skill must **investigate before changing**. Never assume variable names, ports, database, framework, repository layout, or migrations strategy.
+
+## Start here
+
+1. Identify whether the request is planning, diagnosis, a prepared-file change, or a live deployment.
+2. Audit the host and application before proposing ports, containers, or configuration.
+3. Present an exposure choice whenever it changes who can access the service.
+4. Apply only the approved plan; validate the running stack, persistence, and the chosen access route.
+
+The remaining sections are an operational reference. Read the phase that matches the current decision instead of treating every command as a required runbook.
 
 ---
 
